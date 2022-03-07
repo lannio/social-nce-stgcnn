@@ -3,7 +3,20 @@ import torch.nn as nn
 from contrast.sampling import EventSampler
 from contrast.visualize import plot_samples
 
+'''    
+    parser.add_argument('--contrast_sampling', type=str, default='event')
+    parser.add_argument('--contrast_weight', type=float, default=0.0) # 0.05
+    parser.add_argument('--contrast_horizon', type=int, default=4)
+    parser.add_argument('--contrast_temperature', type=float, default=0.2)
+    parser.add_argument('--contrast_range', type=float, default=2.0)
+    parser.add_argument('--contrast_nboundary', type=int, default=0)
+    parser.add_argument('--ratio_boundary', type=float, default=0.5)
+    parser.add_argument('--contrast_loss', type=str, default='nce')
+    parser.add_argument('--contrast_minsep', type=float, default=0.2)
+    parser.add_argument('--safe_traj', action='store_true', default=False,
+                        help='remove training trajectories with collision')
 
+'''
 class SocialNCE():
     '''
     Social contrastive loss, encourage the extracted motion representation to be aware of socially unacceptable events

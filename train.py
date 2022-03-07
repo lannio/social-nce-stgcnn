@@ -1,3 +1,5 @@
+import os
+import logging
 import pandas
 import pickle
 import argparse
@@ -19,12 +21,39 @@ random.seed(random_seed)
 np.random.seed(random_seed)
 torch.manual_seed(random_seed)
 
+def set_logger(log_path):
+    """Set the logger to log info in terminal and file `log_path`.
+    In general, it is useful to have a logger so that every output to the terminal is saved
+    in a permanent file. Here we save it to `model_dir/train.log`.
+    Example:
+    ```
+    logging.info("Starting training...")
+    ```
+    Args:
+        log_path: (string) where to log
+    """
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    if not logger.handlers:
+        # Logging to a file
+        file_handler = logging.FileHandler(log_path)
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s:%(levelname)s: %(message)s")
+        )
+        logger.addHandler(file_handler)
+
+        # Logging to console
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(logging.Formatter("%(message)s"))
+        logger.addHandler(stream_handler)
 
 def graph_loss(V_pred, V_target):
     return bivariate_loss(V_pred,V_target)
 
 
 def train(model, contrastive, optimizer, device, loader_train, epoch, metrics, args):
+    #     metrics = {'train_loss': [], 'task_loss': [], 'contrast_loss': [], 'val_loss': []}
     model.train()
     loss_batch, loss_total_batch, loss_contrast_batch = 0, 0, 0
     batch_count = 0
@@ -40,10 +69,11 @@ def train(model, contrastive, optimizer, device, loader_train, epoch, metrics, a
         obs_traj, pred_traj_gt, obs_traj_rel, pred_traj_gt_rel, non_linear_ped,\
          loss_mask, V_obs, A_obs, V_tr, A_tr, safety_gt_ = batch
         # dimensionality reminder: obs_traj: [1, num_person, 2, 8]; pred_traj_gt: [1, num_person, 2, 12]
+        # [1,8,num_person,2] [1,8,num_person,num_person] [1,12,num_person,2] [1,12,num_person,num_person] 
 
         pick_safe_traj = args.safe_traj
         num_person = pred_traj_gt.size(1)
-        safety_gt = safety_gt_.view(-1) if pick_safe_traj else torch.ones(num_person).bool().to(device)
+        safety_gt = safety_gt_.view(-1) if pick_safe_traj else torch.ones(num_person).bool().to(device) # num_person,
         if pick_safe_traj and safety_gt.sum() == 0:
             # skip this batch if there is no collision-free trajectories
             continue
@@ -53,6 +83,7 @@ def train(model, contrastive, optimizer, device, loader_train, epoch, metrics, a
         #V_obs = batch,seq,node,feat
         #V_obs_tmp = batch,feat,seq,node
         V_obs_tmp = V_obs.permute(0, 3, 1, 2)  # [1, 2, 8, num_person]  <- [1, 8, num_person, 2]
+
 
         V_pred, _, feat_vec = model(V_obs_tmp, A_obs.squeeze(), return_feat=True)  # [1, 5, 12, num_person], [1, num_person, 60]
 
@@ -115,8 +146,9 @@ def train(model, contrastive, optimizer, device, loader_train, epoch, metrics, a
             loss_batch += loss.item()
             loss_contrast_batch += loss_contrast.item()
             loss_total_batch += loss_total.item()
-            print('TRAIN:','\t Epoch:', epoch,'\t Total loss:',loss_total_batch/batch_count, '\t task loss:', loss_batch/batch_count,
-                  '\t contrast loss:', loss_contrast_batch/batch_count)
+            # log error
+            # logging.info('TRAIN: Epoch:{:.3f}, Total loss:{:.3f}, task loss:{:.3f},contrast loss:{:.3f}')
+            logging.info('TRAIN: Epoch:{:.6f}, Total loss:{:.6f}, task loss:{:.6f},contrast loss:{:.6f}'.format(epoch, loss_total_batch/batch_count, loss_batch/batch_count, loss_contrast_batch/batch_count))
 
     metrics['train_loss'].append(loss_total_batch/batch_count)
     metrics['task_loss'].append(loss_batch/batch_count)
@@ -163,7 +195,9 @@ def vald(model, device, loader_val, epoch, metrics, constant_metrics, args, chec
             is_fst_loss = True
             #Metrics
             loss_batch += loss.item()
-            print('VALD:','\t Epoch:', epoch,'\t Loss:',loss_batch/batch_count)
+            # log error
+            logging.info('VALD: Epoch:{:.6f},Loss:{:.6f}'.format(epoch,loss_batch/batch_count))
+            # logging.info('Time to multiprocess all {:d} pieces of batch data: {:.3f}s'.format(num_batch, time_elapsed))
 
     metrics['val_loss'].append(loss_batch/batch_count)
 
@@ -179,6 +213,7 @@ def stack_dict(data_dict):
 
 
 def process_batch_data(batch_idx: int, V_pred_rel_to_abs_ksteps: np.ndarray, V_y_rel_to_abs: np.ndarray, compute_col_truth=False):
+     # [KSTEPS, 12, num_object, 2]  # [12, num_object, 2]
     ade_ls = {}
     fde_ls = {}
     coll_ls = {}
@@ -217,7 +252,7 @@ def process_batch_data(batch_idx: int, V_pred_rel_to_abs_ksteps: np.ndarray, V_y
             target_trajs_all = V_y_rel_to_abs.transpose(1, 0, 2)  # [num_person, 12, 2]
             col_mask_cross = compute_col(predicted_traj, target_trajs_all).astype(np.float64)  # [56], prediction x ground-truth
 
-            if compute_col_truth:
+            if compute_col_truth: # fist epoch
                 col_mask_truth = compute_col(target_traj, target_trajs_all).astype(np.float64)  # [56], between ground-truth
                 coll_truth_data_ls[n].append(col_mask_truth)
 
@@ -313,13 +348,13 @@ def test(model, device, loader_test, epoch, KSTEPS=20):
             sub_kstep_V_pred_ls = np.stack(sub_kstep_V_pred_ls, axis=0)  # [KSTEPS, 12, sub_num_person, 2]
             kstep_V_pred_ls.append(sub_kstep_V_pred_ls)
         kstep_V_pred_ls = np.concatenate(kstep_V_pred_ls, axis=2)  # [KSTEPS, 12, num_person, 2]
-        kstep_V_pred = np.concatenate([traj for traj in kstep_V_pred_ls], axis=1)
+        kstep_V_pred = np.concatenate([traj for traj in kstep_V_pred_ls], axis=1) # [12, KSTEPS * num_person, 2]
         time_sampling_elapsed = time.time() - time_sampling_start
         time_sampling += time_sampling_elapsed
         """end of sampling"""
 
-        V_x = seq_to_nodes(obs_traj.data.cpu().numpy())
-        V_y_rel_to_abs = nodes_rel_to_nodes_abs(V_tr.data.cpu().numpy().squeeze(), V_x[-1, :, :])
+        V_x = seq_to_nodes(obs_traj.data.cpu().numpy()) # [8, num_person, 2]
+        V_y_rel_to_abs = nodes_rel_to_nodes_abs(V_tr.data.cpu().numpy().squeeze(), V_x[-1, :, :]) # [12, num_person, 2] speed???
 
         kstep_V_x = np.concatenate([V_x[-1, :, :]] * KSTEPS, axis=0)  # cat along number of person
         kstep_V_pred_rel_to_abs = nodes_rel_to_nodes_abs(kstep_V_pred, kstep_V_x).reshape(12, KSTEPS, num_of_objs, 2)
@@ -329,8 +364,8 @@ def test(model, device, loader_test, epoch, KSTEPS=20):
         V_y_rel_to_abs_ls[step] = V_y_rel_to_abs  # np.ndarray
 
     time_elapsed = time.time() - time_start
-    print('Time to prepare all {:d} pieces of batch data: {:.3f}s'.format(num_batch, time_elapsed))
-    print('In particular, time for multivariate gaussian distribution sampling: {:.3f}s'.format(time_sampling))
+    logging.info('Time to prepare all {:d} pieces of batch data: {:.6f}s'.format(num_batch, time_elapsed))
+    logging.info('In particular, time for multivariate gaussian distribution sampling: {:.6f}s'.format(time_sampling))
 
     time_start = time.time()
     func_batch_input = []
@@ -345,7 +380,7 @@ def test(model, device, loader_test, epoch, KSTEPS=20):
     with multiprocessing.Pool(processes=multiprocessing.cpu_count()) as pool:
         results = pool.starmap(process_batch_data, func_batch_input)
     time_elapsed = time.time() - time_start
-    print('Time to multiprocess all {:d} pieces of batch data: {:.3f}s'.format(num_batch, time_elapsed))
+    logging.info('Time to multiprocess all {:d} pieces of batch data: {:.6f}s'.format(num_batch, time_elapsed))
 
     for idx_proc, result in enumerate(results):
         ade_bigls += result[0]  # list cat
@@ -377,6 +412,27 @@ def test(model, device, loader_test, epoch, KSTEPS=20):
     return ade_, fde_, coll_, coll_joint_step, coll_joint_cum, coll_cross_step, coll_cross_cum, coll_truth_step, coll_truth_cum, raw_data_dict
 
 
+
+'''
+LR=0.001
+EPOCH=500
+LR_RATE=10
+SAMPLING=event
+LOSS=nce
+HORIZON=4
+TAG_PREFIX=snce
+
+# eth
+WEIGHT=0.05
+TEMP=0.20
+
+python3 train.py --lr ${LR} --n_stgcnn 1 --n_txpcnn 5  --dataset eth --tag ${TAG_PREFIX}-social-stgcnn-eth --contrast_weight ${WEIGHT} 
+--contrast_temperature ${TEMP} --contrast_horizon ${HORIZON} --contrast_sampling ${SAMPLING} --contrast_loss ${LOSS} 
+--num_epochs ${EPOCH} --use_lrschd --lr_sh_rate ${LR_RATE} --safe_traj && echo "eth Launched." &
+P0=$!
+
+'''
+
 def config_parser():
     parser = argparse.ArgumentParser()
 
@@ -396,7 +452,7 @@ def config_parser():
     # Training specifc parameters
     parser.add_argument('--batch_size', type=int, default=128,
                         help='minibatch size')
-    parser.add_argument('--num_epochs', type=int, default=250,
+    parser.add_argument('--num_epochs', type=int, default=250, # 500
                         help='number of epochs')
     parser.add_argument('--clip_grad', type=float, default=None,
                         help='gadient clipping')
@@ -406,10 +462,15 @@ def config_parser():
                         help='number of steps to drop the lr')
     parser.add_argument('--use_lrschd', action="store_true", default=False,
                         help='Use lr rate scheduler')
-    parser.add_argument('--tag', default='tag',
+    parser.add_argument('--folder', default='checkpoint', # snce-social-stgcnn-eth
+                        help='personal folder for the model ')
+    parser.add_argument('--tag', default='tag', # snce-social-stgcnn-eth
                         help='personal tag for the model ')
+
+    # ------------------contrast setting-------------------------------
+
     parser.add_argument('--contrast_sampling', type=str, default='event')
-    parser.add_argument('--contrast_weight', type=float, default=0.0)
+    parser.add_argument('--contrast_weight', type=float, default=0.0) # 0.05
     parser.add_argument('--contrast_horizon', type=int, default=4)
     parser.add_argument('--contrast_temperature', type=float, default=0.2)
     parser.add_argument('--contrast_range', type=float, default=2.0)
@@ -449,11 +510,11 @@ def get_target_metrics(dataset: str, tolerance: float = 0.0):
     return target_ade+tolerance, target_fde+tolerance, target_col
 
 
-def config_model(args, device):
+def config_model(args, device, checkpoint_dir):
     """Define the model."""
     model = social_stgcnn(n_stgcnn=args.n_stgcnn, n_txpcnn=args.n_txpcnn,
                           output_feat=args.output_size, seq_len=args.obs_seq_len,
-                          kernel_size=args.kernel_size, pred_seq_len=args.pred_seq_len).to(device)
+                          kernel_size=args.kernel_size, pred_seq_len=args.pred_seq_len, checkpoint_dir=checkpoint_dir).to(device)
 
     projection_head = ProjHead(feat_dim=60 + 16, hidden_dim=32, head_dim=8).to(device)
     if args.contrast_sampling == 'event':
@@ -462,7 +523,7 @@ def config_model(args, device):
         encoder_sample = SpatialEncoder(hidden_dim=8, head_dim=8).to(device)
     num_params_contrast = sum(
         [p.numel() for layer in [projection_head, encoder_sample] for p in layer.parameters() if p.requires_grad])
-    print('Contrastive learning module # trainable parameters: {:d}'.format(num_params_contrast))
+    logging.info('Contrastive learning module # trainable parameters: {:d}'.format(num_params_contrast))
 
     # contrastive
     if args.contrast_loss == 'nce':
@@ -474,14 +535,15 @@ def config_model(args, device):
     return model, contrastive
 
 
-def get_dataloader(dataset, obs_seq_len, pred_seq_len):
+def get_dataloader(dataset, obs_seq_len, pred_seq_len, checkpoint_dir):
     data_set = './datasets/' + dataset + '/'
 
     dset_train = TrajectoryDataset(
         data_set + 'train/',
         obs_len=obs_seq_len,
         pred_len=pred_seq_len,
-        skip=1, norm_lap_matr=True)
+        skip=1, norm_lap_matr=True,
+        checkpoint_dir=checkpoint_dir)
 
     loader_train = DataLoader(
         dset_train,
@@ -493,7 +555,8 @@ def get_dataloader(dataset, obs_seq_len, pred_seq_len):
         data_set + 'val/',
         obs_len=obs_seq_len,
         pred_len=pred_seq_len,
-        skip=1, norm_lap_matr=True)
+        skip=1, norm_lap_matr=True,
+        checkpoint_dir=checkpoint_dir)
 
     loader_val = DataLoader(
         dset_val,
@@ -505,7 +568,8 @@ def get_dataloader(dataset, obs_seq_len, pred_seq_len):
         data_set + 'test/',
         obs_len=obs_seq_len,
         pred_len=pred_seq_len,
-        skip=1, norm_lap_matr=True)
+        skip=1, norm_lap_matr=True,
+        checkpoint_dir=checkpoint_dir)
 
     loader_test = DataLoader(
         dset_test,
@@ -521,11 +585,11 @@ def pick_from_log(log_path: str, min_epoch: int = 50):
     log_name = '-'.join(os.path.basename(os.path.dirname(log_path)).split('-')[:-3])
     dataset = os.path.basename(os.path.abspath(os.path.join(log_path, '..'))).split('-')[-1]
     if not os.path.exists(log_path):
-        print('Expected training log at {:s} does not exist.'.format(log_path))
+        logging.info('Expected training log at {:s} does not exist.'.format(log_path))
         return None
     model_weights = [anything for anything in os.listdir(os.path.join(os.path.dirname(log_path), 'history')) if anything.endswith('best.pth')]
     if len(model_weights) < min_epoch:
-        print('Training epochs {:d} are too few!'.format(len(model_weights)))
+        logging.info('Training epochs {:d} are too few!'.format(len(model_weights)))
         return None
     else:
         df_raw = pandas.read_csv(log_path)
@@ -544,7 +608,7 @@ def pick_from_log(log_path: str, min_epoch: int = 50):
             best_col_ade = df_['ADE'].values[best_col_idx]
             best_col_fde = df_['FDE'].values[best_col_idx]
             best_col = df_['col_joint_c4'][best_col_idx] if 'col_joint_c4' in df_raw.columns else df_['COLL'][best_col_idx]
-            print('ADE+FDE+COL total error minimizer: ADE: {:.4f}, FDE: {:.4f}, COL: {:.2f}%, EPOCH: {:d}.'.format(
+            logging.info('ADE+FDE+COL total error minimizer: ADE: {:.6f}, FDE: {:.6f}, COL: {:.6f}%, EPOCH: {:d}.'.format(
                 best_col_ade, best_col_fde, best_col * 100, best_col_epoch))
             return best_col_epoch
 
@@ -560,7 +624,7 @@ def pick_from_log(log_path: str, min_epoch: int = 50):
 
             best_fde = df['FDE'].values.min()
             if best_fde > target_fde:
-                print('Tolerance: {:.3f}, FDE too large: {:.4f} > target = {:.4f}'.format(tolerance, best_fde, target_fde))
+                logging.info('Tolerance: {:.6f}, FDE too large: {:.6f} > target = {:.6f}'.format(tolerance, best_fde, target_fde))
                 return None
             else:
                 coll_overall = df['col_joint_c4'].values if 'col_joint_c4' in df.columns else df['COLL'].values
@@ -569,8 +633,8 @@ def pick_from_log(log_path: str, min_epoch: int = 50):
                 best_col_epoch = int(df['Epoch'].values[best_col_idx])
                 best_col_ade = df['ADE'].values[best_col_idx]
                 best_col_fde = df['FDE'].values[best_col_idx]
-                print('Tolerance: {:.3f}, Best FDE: {:.4f} <= target = {:.4f} '.format(tolerance, best_fde, target_fde))
-                print('Best model up to now: ADE: {:.4f}, FDE: {:.4f}, COL: {:.2f}%, EPOCH: {:d}'.format(
+                logging.info('Tolerance: {:.6f}, Best FDE: {:.6f} <= target = {:.6f} '.format(tolerance, best_fde, target_fde))
+                logging.info('Best model up to now: ADE: {:.6f}, FDE: {:.6f}, COL: {:.6f}%, EPOCH: {:d}'.format(
                     best_col_ade, best_col_fde, best_col * 100, best_col_epoch))
         return best_col_epoch
 
@@ -583,79 +647,91 @@ def main():
 
     target_ade, target_fde, target_col = get_target_metrics(args.dataset)
     # to be very conservative
+    '''
+        if dataset == 'eth':
+        # target_ade, target_fde = 0.64, 1.11  # paper
+        target_ade, target_fde = 0.732, 1.223  # pretrained
+        target_col = 1.33
+    '''
     target_ade -= 0.05
     target_fde -= 0.05
 
-    print('*' * 30)
-    print("Training initiating....")
-    print(args)
-
-    # Define the model
-    model, contrastive = config_model(args, device)
-
-    # Data loader
-    loader_train, loader_val, loader_test = get_dataloader(args.dataset, args.obs_seq_len, args.pred_seq_len)
-
-    # Optimizer settings
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-
-    if args.use_lrschd:
-        patience_epoch = args.lr_sh_rate
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=patience_epoch, threshold=0.01,
-                                                         factor=0.5, cooldown=patience_epoch, min_lr=1e-5, verbose=True)
-
-    # Training log settings
-    checkpoint_dir = './checkpoint/' + args.tag + '/'
+     # Training log settings
+    checkpoint_dir = '../../scratch/experiment/socialnce/' + args.folder + '/' + args.tag + '/'
     history_dir = os.path.join(checkpoint_dir, 'history') + '/'
     csv_path = os.path.join(checkpoint_dir, 'training_log.csv')
 
     for folder in [checkpoint_dir, history_dir]:
         if not os.path.exists(folder):
             os.makedirs(folder)
+    set_logger(os.path.join(checkpoint_dir, "train.log"))
+
+
+    logging.info('*' * 30)
+    logging.info("Training initiating....")
+    logging.info(args)
+
+    # Define the model
+    model, contrastive = config_model(args, device, checkpoint_dir)
+
+    # Data loader
+    loader_train, loader_val, loader_test = get_dataloader(args.dataset, args.obs_seq_len, args.pred_seq_len, checkpoint_dir)
+
+    # Optimizer settings
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+
+    # new optim ,lanni
+    if args.use_lrschd:
+        patience_epoch = args.lr_sh_rate
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=patience_epoch, threshold=0.01,
+                                                         factor=0.5, cooldown=patience_epoch, min_lr=1e-5, verbose=True)
+
 
     # save argument once and for all
     with open(checkpoint_dir + 'args.pkl', 'wb') as fp:
         pickle.dump(args, fp)
 
-    print('Checkpoint dir:', checkpoint_dir)
+    logging.info('Checkpoint dir:{:s}' .format(checkpoint_dir))
 
     metrics = {'train_loss': [], 'task_loss': [], 'contrast_loss': [], 'val_loss': []}
     constant_metrics = {'min_val_epoch': -1, 'min_val_loss': 9999999999999999}
 
     # Start training
-    print('Training started ...')
+    logging.info('Training started ...')
     ade_ls, fde_ls, coll_ls, ttl_error_ls = [], [], [], []
     best_ade, best_fde, best_coll, best_ttl_error, best_coll_joint_c4_error, best_coll_joint_c4 = 99999., 99999., 99999., 99999., 99999., 99999.
 
     df = pandas.DataFrame(columns=['Epoch', 'total_loss', 'task_loss', 'contrast_loss', 'validation_loss', 'ADE', 'FDE', 'COLL'])
+    
     for epoch in range(args.num_epochs):
         time_start = time.time()
         train(model, contrastive, optimizer, device, loader_train, epoch, metrics, args)
         time_elapsed = time.time() - time_start
-        print('Time to train once: {:.2f} s for dataset {:s}'.format(time_elapsed, args.dataset))
+        logging.info('Time to train once: {:.2f} s for dataset {:s}'.format(time_elapsed, args.dataset))
 
         time_start = time.time()
         vald(model, device, loader_val, epoch, metrics, constant_metrics, args, checkpoint_dir)
         time_elapsed = time.time() - time_start
-        print('Time to validate once: {:.2f} s for dataset {:s}'.format(time_elapsed, args.dataset))
+        logging.info('Time to validate once: {:.2f} s for dataset {:s}'.format(time_elapsed, args.dataset))
         if args.use_lrschd:
             ttl_loss = metrics['train_loss'][-1]
             scheduler.step(ttl_loss)  # learning rate decay once training stagnates
 
-        print('*' * 30)
-        print('Epoch:', args.tag, ":", epoch)
+        logging.info('*' * 30)
+        logging.info('Epoch:{:s}, :, {:d}'.format(args.tag,epoch))
         for k, v in metrics.items():
             if len(v) > 0:
-                print(k, v[-1])
+                logging.info('k:{:s},v:{:.6f}'.format(k, v[-1]))
 
         """Test per epoch"""
         ade_, fde_, coll_ = 999999.0, 999999.0, 999999.0
-        print("Testing ....")
+        logging.info("Testing ....")
         time_start = time.time()
         ad, fd, coll, coll_joint_step, coll_joint_cum, coll_cross_step, coll_cross_cum, coll_truth_step, coll_truth_cum, _ = test(
             model, device, loader_test, epoch)
+        # ???coll_joint_cum
         time_elapsed = time.time() - time_start
-        print('Time to test once: {:.2f} s for dataset {:s}'.format(time_elapsed, args.dataset))
+        logging.info('Time to test once: {:.2f} s for dataset {:s}'.format(time_elapsed, args.dataset))
         ade_, fde_, coll_ = min(ade_, ad), min(fde_, fd), min(coll_, coll_joint_cum[2])
         ttl_error_ = np.clip(ade_ - target_ade, a_min=0.0, a_max=None) + np.clip(fde_ - target_fde, a_min=0.0, a_max=None) + coll_
 
@@ -663,15 +739,15 @@ def main():
         fde_ls.append(fde_)
         coll_ls.append(coll_)
         ttl_error_ls.append(ttl_error_)
-        print("ADE: {:.4f}, FDE: {:.4f}, COL: {:.4f}, Total ERROR: {:.4f}, COL_JOINT_C4: {:.4F}".format(
+        logging.info("ADE: {:.4f}, FDE: {:.4f}, COL: {:.4f}, Total ERROR: {:.4f}, COL_JOINT_C4: {:.4F}".format(
             ade_, fde_, coll_, ttl_error_, coll_joint_cum[2]))
 
         best_ade = min(ade_, best_ade)
         best_fde = min(fde_, best_fde)
         best_coll = min(coll_, best_coll)
-        best_ttl_error = min(ttl_error_, best_ttl_error)
+        best_ttl_error = min(ttl_error_, best_ttl_error) #加权total
         best_coll_joint_c4 = min(coll_joint_cum[2], best_coll_joint_c4)
-        print(
+        logging.info(
             "Best ADE: {:.4f}, Best FDE: {:.4f}, Best COL: {:.4f}, Best Total ERROR: {:.4f}, Best COL_JOINT_C4: {:.4F}".format(
                 best_ade, best_fde, best_coll, best_ttl_error, best_coll_joint_c4))
 
@@ -684,11 +760,11 @@ def main():
             df.iloc[-1:].to_csv(csv_path, mode='a', header=False, index=False)
 
         best_epoch = pick_from_log(csv_path, 0)
-        print('Best epoch up to now is {}'.format(best_epoch))
+        logging.info('Best epoch up to now is {}'.format(best_epoch))
         """Test ends"""
 
-        print(constant_metrics)
-        print('*'*30)
+        logging.info(constant_metrics)
+        logging.info('*'*30)
 
         with open(history_dir+'epoch{:03d}_metrics.pkl'.format(epoch), 'wb') as fp:
             pickle.dump(metrics, fp)

@@ -16,6 +16,7 @@ def anorm(p1,p2):
     return 1/(NORM)
                 
 def seq_to_graph(seq_,seq_rel,norm_lap_matr = True):
+    # num,2,len
     seq_ = seq_.squeeze()
     seq_rel = seq_rel.squeeze()
     seq_len = seq_.shape[2]
@@ -24,16 +25,16 @@ def seq_to_graph(seq_,seq_rel,norm_lap_matr = True):
     
     V = np.zeros((seq_len,max_nodes,2))
     A = np.zeros((seq_len,max_nodes,max_nodes))
-    for s in range(seq_len):
+    for s in range(seq_len): # time_length
         step_ = seq_[:,:,s]
         step_rel = seq_rel[:,:,s]
-        for h in range(len(step_)): 
-            V[s,h,:] = step_rel[h]
-            A[s,h,h] = 1
+        for h in range(len(step_)):  # num_person
+            V[s,h,:] = step_rel[h] # seq,node,2
+            A[s,h,h] = 1 # seq,node,node
             for k in range(h+1,len(step_)):
                 l2_norm = anorm(step_rel[h],step_rel[k])
                 A[s,h,k] = l2_norm
-                A[s,k,h] = l2_norm
+                A[s,k,h] = l2_norm # 对角线1 其余l2倒数
         if norm_lap_matr: 
             G = nx.from_numpy_matrix(A[s,:,:])
             A[s,:,:] = nx.normalized_laplacian_matrix(G).toarray()
@@ -75,8 +76,9 @@ def read_file(_path, delim='\t'):
 class TrajectoryDataset(Dataset):
     """Dataloder for the Trajectory datasets"""
     def __init__(
-        self, data_dir, obs_len=8, pred_len=8, skip=1, threshold=0.002,
-        min_ped=1, delim='\t',norm_lap_matr = True):
+        self, data_dir, obs_len=8, pred_len=12, skip=1, threshold=0.002,
+        min_ped=1, delim='\t',norm_lap_matr = True,
+        checkpoint_dir=checkpoint_dir):
         """
         Args:
         - data_dir: Directory containing dataset files in the format
@@ -98,7 +100,7 @@ class TrajectoryDataset(Dataset):
         self.skip = skip
         self.seq_len = self.obs_len + self.pred_len
         self.delim = delim
-        self.norm_lap_matr = norm_lap_matr
+        self.norm_lap_matr = norm_lap_matr # True
 
         all_files = os.listdir(self.data_dir)
         all_files = [os.path.join(self.data_dir, _path) for _path in all_files]
@@ -155,10 +157,10 @@ class TrajectoryDataset(Dataset):
 
                 if num_peds_considered > min_ped:
                     non_linear_ped += _non_linear_ped
-                    num_peds_in_seq.append(num_peds_considered)
-                    loss_mask_list.append(curr_loss_mask[:num_peds_considered])
-                    seq_list.append(curr_seq[:num_peds_considered])
-                    seq_list_rel.append(curr_seq_rel[:num_peds_considered])
+                    num_peds_in_seq.append(num_peds_considered) # bs,num_person
+                    loss_mask_list.append(curr_loss_mask[:num_peds_considered]) # bs,num_person,time_length
+                    seq_list.append(curr_seq[:num_peds_considered]) # bs,num_person,2,time_length
+                    seq_list_rel.append(curr_seq_rel[:num_peds_considered]) # bs,num_person,2,time_length
 
         self.num_seq = len(seq_list)
         seq_list = np.concatenate(seq_list, axis=0)
@@ -191,7 +193,10 @@ class TrajectoryDataset(Dataset):
             self.A_obs = []
             self.v_pred = []
             self.A_pred = []
-            print("Processing Data .....")
+            # print("Processing Data .....")
+            log_file = open(os.path.join(checkpoint_dir, "-info.txt"), "w")
+            log_file.write("Processing Data .....")
+            log_file.close()
             pbar = tqdm(total=len(self.seq_start_end))
             for ss in range(len(self.seq_start_end)):
                 pbar.update(1)
@@ -210,16 +215,19 @@ class TrajectoryDataset(Dataset):
         else:
             graph_data = torch.load(graph_data_path)
             self.v_obs, self.A_obs, self.v_pred, self.A_pred = graph_data['v_obs'], graph_data['A_obs'], graph_data['v_pred'], graph_data['A_pred']
-            print('Loaded pre-processed graph data at {:s}.'.format(graph_data_path))
+            log_file = open(os.path.join(checkpoint_dir, "-info.txt"), "w")
+            log_file.write('Loaded pre-processed graph data at {:s}.'.format(graph_data_path))
+            log_file.close()
+            # print('Loaded pre-processed graph data at {:s}.'.format(graph_data_path))
 
         # prepare safe trajectory mask
-        self.safe_traj_masks = []
+        self.safe_traj_masks = [] #[bs,num_person]
         for batch_idx in range(len(self.seq_start_end)):
             start, end = self.seq_start_end[batch_idx]
             pred_traj_gt = self.pred_traj[start:end, :]  # [num_person, 2, 12]
 
             num_person = pred_traj_gt.size(0)
-            safety_gt = torch.zeros(num_person).bool()
+            safety_gt = torch.zeros(num_person).bool()   # [num_person]
             label_tarj_all = pred_traj_gt.permute(0, 2, 1).cpu().numpy()  # [num_person, 12, 2]
             for person_idx in range(num_person):
                 label_traj_primary = label_tarj_all[person_idx]
@@ -241,6 +249,7 @@ class TrajectoryDataset(Dataset):
                 self.v_obs[index], self.A_obs[index],
                 self.v_pred[index], self.A_pred[index], self.safe_traj_masks[index]
             ]
+            # node, 2, 8/12    8/12,node,2 8/12,node,node
         else:
             out = [
                 self.obs_traj[start:end, :], self.pred_traj[start:end, :],
@@ -255,13 +264,14 @@ class TrajectoryDataset(Dataset):
 def interpolate_traj(traj, num_interp=4):
     '''
     Add linearly interpolated points of a trajectory
+    [num_person, 12, 2] 4
     '''
     sz = traj.shape
-    dense = np.zeros((sz[0], (sz[1] - 1) * (num_interp + 1) + 1, 2))
+    dense = np.zeros((sz[0], (sz[1] - 1) * (num_interp + 1) + 1, 2)) # num_person* 56(11*5+1),2
     dense[:, :1, :] = traj[:, :1]
 
     for i in range(num_interp+1):
-        ratio = (i + 1) / (num_interp + 1)
+        ratio = (i + 1) / (num_interp + 1) #1/5 2/5 3/5 4/5 1
         dense[:, i+1::num_interp+1, :] = traj[:, 0:-1] * (1 - ratio) + traj[:, 1:] * ratio
 
     return dense
@@ -277,8 +287,8 @@ def compute_col(predicted_traj, predicted_trajs_all, thres=0.2):
     num_interp = 4
     assert predicted_trajs_all.shape[0] > 1
 
-    dense_all = interpolate_traj(predicted_trajs_all, num_interp)
-    dense_ego = interpolate_traj(predicted_traj[None, :], num_interp)
+    dense_all = interpolate_traj(predicted_trajs_all, num_interp) # (5, 56, 2)
+    dense_ego = interpolate_traj(predicted_traj[None, :], num_interp) # (1, 56, 2)
     distances = np.linalg.norm(dense_all - dense_ego, axis=-1)  # [num_person, 12 * num_interp]
     mask = distances[:, 0] > 0  # exclude primary agent itself
-    return (distances[mask].min(axis=0) < thres)
+    return (distances[mask].min(axis=0) < thres) # 56 (11*5+1) 

@@ -155,8 +155,8 @@ class st_gcn(nn.Module):
         return x, A
 
 class social_stgcnn(nn.Module):
-    def __init__(self,n_stgcnn =1,n_txpcnn=1,input_feat=2,output_feat=5,
-                 seq_len=8,pred_seq_len=12,kernel_size=3):
+    def __init__(self,n_stgcnn =5,n_txpcnn=1,input_feat=2,output_feat=5,
+                 seq_len=8,pred_seq_len=12,kernel_size=3, checkpoint_dir=checkpoint_dir):
         super(social_stgcnn,self).__init__()
         self.n_stgcnn= n_stgcnn
         self.n_txpcnn = n_txpcnn
@@ -167,7 +167,7 @@ class social_stgcnn(nn.Module):
             self.st_gcns.append(st_gcn(output_feat,output_feat,(kernel_size,seq_len)))
         
         self.tpcnns = nn.ModuleList()
-        self.tpcnns.append(nn.Conv2d(seq_len,pred_seq_len,3,padding=1))
+        self.tpcnns.append(nn.Conv2d(seq_len,pred_seq_len,3,padding=1)) # [1, 12, 5, num_person]  <-- [1, 8, 5, num_person]
         for j in range(1,self.n_txpcnn):
             self.tpcnns.append(nn.Conv2d(pred_seq_len,pred_seq_len,3,padding=1))  # [1, 12, 5, num_person]
         self.tpcnn_ouput = nn.Conv2d(pred_seq_len,pred_seq_len,3,padding=1)  # [1, 12, 5, num_person]
@@ -190,13 +190,19 @@ class social_stgcnn(nn.Module):
         num_params_encoder = sum([p.numel() for layer in self.my_encoder for p in layer.parameters() if p.requires_grad])
         num_params_decoder = sum([p.numel() for layer in self.my_decoder for p in layer.parameters() if p.requires_grad])
         num_params_ttl = sum([p.numel() for p in self.parameters() if p.requires_grad])
-        print('Encoder trainable parameters: {:d} / {:d}, decoder: {:d} / {:d}.'.format(num_params_encoder, num_params_ttl, num_params_decoder, num_params_ttl))
+        
+        log_file = open(os.path.join(checkpoint_dir, "-info.txt"), "w")
+        log_file.write('Encoder trainable parameters: {:d} / {:d}, decoder: {:d} / {:d}.'.format(num_params_encoder, num_params_ttl, num_params_decoder, num_params_ttl))
+        log_file.close()
+        
+        # print('Encoder trainable parameters: {:d} / {:d}, decoder: {:d} / {:d}.'.format(num_params_encoder, num_params_ttl, num_params_decoder, num_params_ttl))
 
     def forward(self,v, a, return_feat=False):
+         # [1, 2, 8, num_person]  # [8, num_person, 2] #[num_person]
         for k in range(self.n_stgcnn):
             v, a = self.st_gcns[k](v, a)
             
-        v = v.view(v.shape[0], v.shape[2], v.shape[1], v.shape[3])
+        v = v.view(v.shape[0], v.shape[2], v.shape[1], v.shape[3]) # [1, 8, 5, num_person]
         
         v = self.prelus[0](self.tpcnns[0](v))  # [1, 12, 5, num_person]
 
